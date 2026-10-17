@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
-from dataset_loaders.utils import random_rot_flip, random_rotate
+from utils import random_rot_flip, random_rotate
 
 
 class CityscapesDataset(Dataset):
@@ -35,8 +35,8 @@ class CityscapesDataset(Dataset):
         for img_path in images_paths:
             mask_path = Path(
                 str(img_path)
-                .replace("leftImg8bit", "gtFine")
                 .replace("_leftImg8bit.png", "_gtFine_labelTrainIds.png")
+                .replace("leftImg8bit", "gtFine")
             )
             if not mask_path.exists():
                 missing.append(str(mask_path))
@@ -44,7 +44,7 @@ class CityscapesDataset(Dataset):
             self.data.append((img_path, mask_path))
 
         if missing:
-            raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s)")
+            raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s) dans le path {mask_path}")
 
         print(f"[CityscapesDataset] split={split} -> {len(self.data)} paires")
 
