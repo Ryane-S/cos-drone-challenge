@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
-from utils import random_rot_flip, random_rotate
+from dataset_loaders.utils import random_rot_flip, random_rotate
 
 
 class CityscapesDataset(Dataset):
@@ -26,7 +26,7 @@ class CityscapesDataset(Dataset):
         self.data_path = Path(data_path)
         self.images_dir = self.data_path / "leftImg8bit" / split
 
-        images_paths = sorted(self.images_dir.glob("**/*_leftImg8bit_laser.png"))
+        images_paths = sorted(self.images_dir.glob("**/*_leftImg8bit.png"))
         if not images_paths:
             raise FileNotFoundError(f"Aucune image dans {self.images_dir}")
 
@@ -35,7 +35,7 @@ class CityscapesDataset(Dataset):
         for img_path in images_paths:
             mask_path = Path(
                 str(img_path)
-                .replace("_leftImg8bit_laser.png", "_gtFine_labelTrainIds_laser.png")
+                .replace("_leftImg8bit.png", "_gtFine_labelTrainIds.png")
                 .replace("leftImg8bit", "gtFine")
             )
             if not mask_path.exists():

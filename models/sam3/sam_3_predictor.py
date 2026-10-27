@@ -10,9 +10,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 from transformers import Sam3Model, Sam3Processor
-
 from dataset_loaders.load_cityscapes_dataset import build_dataloader
-
 
 class Sam3LaserDetector:
     def __init__(
@@ -21,6 +19,7 @@ class Sam3LaserDetector:
         device="cuda",
         confidence_threshold=0.3,
         prompt="laser",
+        token=""
     ):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
@@ -28,8 +27,11 @@ class Sam3LaserDetector:
         self.prompt = prompt
         self.confidence_threshold = confidence_threshold
 
-        self.processor = Sam3Processor.from_pretrained(model_name_or_path)
-        self.model = Sam3Model.from_pretrained(model_name_or_path).to(self.device).eval()
+        if token == "":
+            raise RuntimeError("Token HF non renseigné")
+
+        self.processor = Sam3Processor.from_pretrained(model_name_or_path, token=token)
+        self.model = Sam3Model.from_pretrained(model_name_or_path, token=token).to(self.device).eval()
 
     @torch.inference_mode()
     def predict(self, image_tensor):
@@ -49,22 +51,24 @@ class Sam3LaserDetector:
         )
         pil_image = Image.fromarray(rgb)
 
-        # 2. Encodage de l'image
-        state = self.processor.set_image(pil_image)
+        # 2. Préparation des entrées via l'API standard d'Hugging Face (Texte + Image)
+        inputs = self.processor(images=pil_image, text=self.prompt, return_tensors="pt").to(self.device)
 
-        # 3. Prompt texte
-        output = self.processor.set_text_prompt(state=state, prompt=self.prompt)
+        # 3. Inférence du modèle
+        outputs = self.model(**inputs)
 
-        masks = output.get("masks", torch.empty(0, 1, *rgb.shape[:2]))
-        scores = output.get("scores", torch.empty(0))
-        boxes = output.get("boxes", torch.empty(0, 4))
+        # 4. Post-processing avec les fonctions utilitaires du processeur Hugging Face
+        # (Seuil par défaut à 0.5 ajusté selon vos besoins de détection)
+        post_processed_results = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.confidence_threshold,
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
 
-        # 4. Filtrer par seuil de confiance
-        if scores.numel() > 0:
-            keep = scores >= self.confidence_threshold
-            masks = masks[keep]
-            scores = scores[keep]
-            boxes = boxes[keep]
+        masks = post_processed_results["masks"]    # Tenseur de masques binaires redimensionnés
+        boxes = post_processed_results["boxes"]    # Boîtes au format [x1, y1, x2, y2]
+        scores = post_processed_results["scores"]  # Scores de confiance de chaque détection
 
         return {
             "masks": masks.cpu(),
@@ -109,12 +113,16 @@ def save_visualization(result, output_path):
 
 def main():
     # --- Paramètres ---
-    PROMPTS = ["laser", "red laser dot", "red dot", "bright spot"]
+    PROMPTS = ["laser", "laser dot", "laser beam", "car", "building"]
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {DEVICE}")
 
-    # --- Dataloader (même principe, juste moins d'images) ---
+    with open("sam3_token", "r") as file:
+        token = file.read().strip()  # .strip() pour enlever les espaces ou retours à la ligne du token
+
+    # --- Dataloader ---
     loader = build_dataloader(
-        "data/cityscapes",
+        "samples",
         split="val",
         batch_size=1,
         num_workers=0,
@@ -124,7 +132,6 @@ def main():
 
     # --- Récupérer quelques images ---
     images, targets = next(iter(loader))
-    # Si vous avez un dataset preprocessed avec laser, adaptez le chemin ci-dessus.
 
     output_dir = Path("predictions_laser")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +142,7 @@ def main():
             device=DEVICE,
             confidence_threshold=0.3,
             prompt=prompt,
+            token=token
         )
 
         for index, image in enumerate(images):
