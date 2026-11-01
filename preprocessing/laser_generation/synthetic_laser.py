@@ -201,13 +201,22 @@ def generate_synthetic_laser(image, seed=None, position=None, return_layers=Fals
     """Contrôleur : tirage -> relations -> rendu. Même seed = même résultat.
 
     Retourne (image, metadata), ou (image, metadata, layers).
+    metadata["bbox"] = (i_min, i_max, j_min, j_max) ou None si laser absent,
+    avec i = ligne (row) et j = colonne (col).
     """
     rng = np.random.default_rng(seed)
     latents = sample_latents(rng)
     params = params_from_latents(latents, np.shape(image), rng, position)
-    rendered = render_laser(image, params, return_layers=return_layers)
-    metadata = dict(seed=seed, latents=latents, params=asdict(params))
+    rendered, layers = render_laser(image, params, return_layers=True)
+    envelope = layers["envelope"]
+    mask = envelope > 0.05
+    if mask.any():
+        rows = np.where(np.any(mask, axis=1))[0]
+        cols = np.where(np.any(mask, axis=0))[0]
+        bbox = (int(rows[0]), int(rows[-1]), int(cols[0]), int(cols[-1]))
+    else:
+        bbox = None
+    metadata = dict(seed=seed, latents=latents, params=asdict(params), bbox=bbox)
     if return_layers:
-        result, layers = rendered
-        return result, metadata, layers
+        return rendered, metadata, layers
     return rendered, metadata

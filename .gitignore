@@ -11,3 +11,9 @@ wheels/
 
 # Data folders
 data/
+
+# Environment variables file
+.env
+
+# Model checkpoints folder
+checkpoints/
