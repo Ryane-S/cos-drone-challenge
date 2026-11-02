@@ -5,12 +5,17 @@ build/
 dist/
 wheels/
 *.egg-info
+.idea/
 
 # Virtual environments
 .venv
 
 # Data folders
 data/
+predictions_laser/
+
+# Token's file
+sam3_token
 
 # Environment variables file
 .env

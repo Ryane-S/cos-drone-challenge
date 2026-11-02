@@ -1,7 +1,12 @@
 """
 Inférence zero-shot SAM3 pour détecter un point laser.
-Garde le dataloader existant, mais utilise un prompt unique.
+Itère sur l'ensemble du dataloader et optimise le chargement du modèle.
 """
+
+import warnings
+# Masque les alertes de dépréciation et les avertissements de cache Hugging Face sous Windows
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from pathlib import Path
 import numpy as np
@@ -18,13 +23,11 @@ class Sam3LaserDetector:
         model_name_or_path="facebook/sam3",
         device="cuda",
         confidence_threshold=0.3,
-        prompt="laser",
         token=""
     ):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA indisponible.")
-        self.prompt = prompt
         self.confidence_threshold = confidence_threshold
 
         if token == "":
@@ -34,9 +37,10 @@ class Sam3LaserDetector:
         self.model = Sam3Model.from_pretrained(model_name_or_path, token=token).to(self.device).eval()
 
     @torch.inference_mode()
-    def predict(self, image_tensor):
+    def predict(self, image_tensor, prompt="laser"):
         """
         image_tensor : [3, H, W] float32 in [0, 1]
+        prompt : Texte décrivant l'objet à détecter
         Retourne un dict avec masks, boxes, scores.
         """
         # 1. Tensor -> PIL Image (SAM3 attend du uint8 RGB)
@@ -51,14 +55,13 @@ class Sam3LaserDetector:
         )
         pil_image = Image.fromarray(rgb)
 
-        # 2. Préparation des entrées via l'API standard d'Hugging Face (Texte + Image)
-        inputs = self.processor(images=pil_image, text=self.prompt, return_tensors="pt").to(self.device)
+        # 2. Préparation des entrées via l'API standard d'Hugging Face (Texte dynamique + Image)
+        inputs = self.processor(images=pil_image, text=prompt, return_tensors="pt").to(self.device)
 
         # 3. Inférence du modèle
         outputs = self.model(**inputs)
 
-        # 4. Post-processing avec les fonctions utilitaires du processeur Hugging Face
-        # (Seuil par défaut à 0.5 ajusté selon vos besoins de détection)
+        # 4. Post-processing
         post_processed_results = self.processor.post_process_instance_segmentation(
             outputs,
             threshold=self.confidence_threshold,
@@ -113,16 +116,85 @@ def save_visualization(result, output_path):
 
 def main():
     # --- Paramètres ---
-    PROMPTS = ["laser", "laser dot", "laser beam", "car", "building"]
+    PROMPTS = [
+        # "laser",
+        # "laser dot",
+        # "laser beam",
+        "laser spot",
+        "laser pointer spot",
+        "laser point",
+        "laser projection spot",
+        # "light",
+        # "dot",
+        # "ellipse",
+        # "green laser",
+        # "green laser dot",
+        # "green laser beam",
+        "green laser spot",
+        "green laser pointer spot",
+        "green laser point",
+        "green laser projection spot",
+        # "green light",
+        # "green dot",
+        # "green ellipse",
+        # "colored laser",
+        # "colored laser beam",
+        # "colored laser dot",
+        "colored laser spot",
+        "colored laser pointer spot",
+        "colored laser point",
+        "colored laser projection spot",
+        # "colored light",
+        # "colored dot",
+        # "colored ellipse",
+        # "green",
+        "projection"
+    ]
+
+    PROMPTS_RESULTS = {
+        "laser": (0, 0, 0),
+        "laser dot": (0, 0, 0),
+        "laser beam": (0, 0, 0),
+        "laser spot": (0, 0, 0),
+        "laser pointer spot": (0, 0, 0),
+        "laser point": (0, 0, 0),
+        "laser projection spot": (0, 0, 0),
+        "light": (25, 25, 12),
+        "dot": (1, 0, 0),
+        "ellipse": (0, 0, 0),
+        "green laser": (1, 0, 0),
+        "green laser dot": (1, 0, 0),
+        "green laser beam": (1, 0, 0),
+        "green laser spot": (1, 0, 0),
+        "green laser pointer spot": (1, 0, 0),
+        "green laser point": (1, 0, 0),
+        "green laser projection spot": (1, 1, 0),
+        "green light": (1, 1, 1),
+        "green dot": (1, 1, 0),
+        "green ellipse": (1, 0, 0),
+        "colored laser": (0, 0, 0),
+        "colored laser beam": (0, 0, 0),
+        "colored laser dot": (1, 0, 0),
+        "colored laser spot": (1, 0, 0),
+        "colored laser pointer spot": (1, 0, 0),
+        "colored laser point": (1, 0, 0),
+        "colored laser projection spot": (0, 0, 0),
+        "colored light": (4, 0, 2),
+        "colored dot": (1, 0, 0),
+        "colored ellipse": (0, 0, 0),
+        "green": (0, 0, 0),
+        "projection": (0, 0, 0),
+    }
+
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {DEVICE}")
 
     with open("sam3_token", "r") as file:
-        token = file.read().strip()  # .strip() pour enlever les espaces ou retours à la ligne du token
+        token = file.read().strip()
 
-    # --- Dataloader ---
+    # --- Dataloader complet ---
     loader = build_dataloader(
-        "samples",
+        "samples/laser",
         split="val",
         batch_size=1,
         num_workers=0,
@@ -130,35 +202,41 @@ def main():
         drop_last=False,
     )
 
-    # --- Récupérer quelques images ---
-    images, targets = next(iter(loader))
-
     output_dir = Path("predictions_laser")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for prompt in PROMPTS:
-        print(f"\n=== Prompt : '{prompt}' ===")
-        detector = Sam3LaserDetector(
-            device=DEVICE,
-            confidence_threshold=0.3,
-            prompt=prompt,
-            token=token
-        )
+    # --- Initialisation UNIQUE du détecteur ---
+    print("Chargement de SAM3 en mémoire...")
+    detector = Sam3LaserDetector(
+        device=DEVICE,
+        confidence_threshold=0.3,
+        token=token
+    )
 
-        for index, image in enumerate(images):
-            result = detector.predict(image)
-            result["prompt"] = prompt
+    # Compteur global d'images traitées
+    global_image_idx = 0
 
-            print(f"Image {index}: {len(result['scores'])} détection(s)")
-            if len(result["scores"]) > 0:
-                print(f"  Scores: {result['scores'].tolist()}")
-                print(f"  Boîtes: {result['boxes'].tolist()}")
+    # --- Boucle principale sur l'ensemble du dataset ---
+    for batch_idx, (batch_images, batch_targets) in enumerate(loader):
+        for img_in_batch_idx, image in enumerate(batch_images):
 
-            safe_prompt = prompt.replace(" ", "_")
-            save_visualization(
-                result,
-                output_dir / f"{safe_prompt}_sample_{index:02d}.png",
-            )
+            # Pour chaque image, on teste l'ensemble des prompts configurés
+            for prompt in PROMPTS:
+                result = detector.predict(image, prompt=prompt)
+                result["prompt"] = prompt
+
+                print(f"[Image {global_image_idx}] Prompt '{prompt}': {len(result['scores'])} détection(s)")
+                if len(result["scores"]) > 0:
+                    print(f"  Scores: {result['scores'].tolist()}")
+                    print(f"  Boîtes: {result['boxes'].tolist()}")
+
+                safe_prompt = prompt.replace(" ", "_")
+                filename = f"img_{global_image_idx:03d}_{safe_prompt}.png"
+                save_visualization(result, output_dir / filename)
+
+            global_image_idx += 1
+
+    print(f"\nInférence terminée. {global_image_idx} images traitées avec succès.")
 
 
 if __name__ == "__main__":
