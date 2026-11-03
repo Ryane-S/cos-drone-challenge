@@ -36,6 +36,24 @@ La commande suivante crée automatiquement un environnement virtuel et installe 
 uv sync
 ```
 
+## Installation du dataset CityScapes
+
+Pour lancer le téléchargement du dataset, exécuter les commandes suivantes :
+```bash
+uv run csDownload -d data/cityscapes gtFine_trainvaltest.zip
+uv run csDownload -d data/cityscapes leftImg8bit_trainvaltest.zip
+```
+
+Puis, exporter le chemin du dataset :
+```bash
+export CITYSCAPES_DATASET="chemin_vers_cityscapes"
+```
+
+Enfin, exécuter le script de préparation des masques binaires :
+```bash
+csCreateTrainIdLabelImgs
+```
+
 ## Lancement script de prédiction
 
 Pour lancer la prédiction il est essentiel de se prémunir d'un **token Sam3**. Pour cela il est nécessaire :
