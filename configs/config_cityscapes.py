@@ -5,10 +5,14 @@ Configuration du projet pour le dataset Cityscapes. (Inspiré de : https://githu
 class setting_config_cityscapes:
     # Emplacements des datasets
     data_path = 'data/cityscapes'
+    data_path_synthetic = 'data/cityscapes/laser'
 
     # Paramètres du dataset
     num_classes = 19
     ignore_index = 255
+
+    # Label du laser
+    laser_label = 19
 
     # Résolution d'entrée
     input_size_h = 512

@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
-from utils import random_rot_flip, random_rotate
+from dataset_loaders.utils import random_rot_flip, random_rotate
 
 
 class CityscapesDataset(Dataset):
