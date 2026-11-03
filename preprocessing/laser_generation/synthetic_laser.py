@@ -3,6 +3,7 @@
 Composition RGB simplifiée, non radiométrique. Les effets ne constituent
 pas une simulation calibrée d'un objectif ou d'un capteur.
 """
+import cv2
 from dataclasses import dataclass, asdict
 import numpy as np
 from PIL import Image, ImageOps
@@ -201,22 +202,25 @@ def generate_synthetic_laser(image, seed=None, position=None, return_layers=Fals
     """Contrôleur : tirage -> relations -> rendu. Même seed = même résultat.
 
     Retourne (image, metadata), ou (image, metadata, layers).
-    metadata["bbox"] = (i_min, i_max, j_min, j_max) ou None si laser absent,
-    avec i = ligne (row) et j = colonne (col).
+    metadata["contour"] = [(i0, j0), (i1, j1), ...] parcourant le bord exact
+    du spot laser, dans l'ordre (i = ligne, j = colonne). Vide si laser absent.
     """
     rng = np.random.default_rng(seed)
     latents = sample_latents(rng)
     params = params_from_latents(latents, np.shape(image), rng, position)
     rendered, layers = render_laser(image, params, return_layers=True)
+
     envelope = layers["envelope"]
-    mask = envelope > 0.05
-    if mask.any():
-        rows = np.where(np.any(mask, axis=1))[0]
-        cols = np.where(np.any(mask, axis=0))[0]
-        bbox = (int(rows[0]), int(rows[-1]), int(cols[0]), int(cols[-1]))
+    binary = (envelope > 0.05).astype(np.uint8)
+
+    if binary.any():
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        largest = max(contours, key=cv2.contourArea)
+        contour = [(int(pt[0][1]), int(pt[0][0])) for pt in largest]
     else:
-        bbox = None
-    metadata = dict(seed=seed, latents=latents, params=asdict(params), bbox=bbox)
+        contour = []
+
+    metadata = dict(seed=seed, latents=latents, params=asdict(params), contour=contour)
     if return_layers:
         return rendered, metadata, layers
     return rendered, metadata

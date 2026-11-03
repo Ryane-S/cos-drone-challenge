@@ -10,7 +10,7 @@ from configs.config_cityscapes import setting_config_cityscapes
 configs = setting_config_cityscapes()
 splits = ["train", "val", "test"]
 occurences = {}
-save_path = "data/occurences.json"
+save_path = "data/occurences_cityscapes_labels.json"
 
 def main():
     for split in splits:

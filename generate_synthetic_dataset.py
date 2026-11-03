@@ -1,6 +1,7 @@
 """Script de génération du dataset synthétique"""
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -51,9 +52,10 @@ def main():
 
             result, metadata = generate_synthetic_laser(image, seed=int(seed))
 
-            if metadata["bbox"] is not None:
-                i_min, i_max, j_min, j_max = metadata["bbox"]
-                mask[i_min:i_max + 1, j_min:j_max + 1] = 19
+            if metadata["contour"]:
+                pts = np.array([(j, i) for (i, j) in metadata["contour"]],
+                            dtype=np.int32).reshape(-1, 1, 2)
+                cv2.fillPoly(mask, [pts], 19)
 
             output_dir = data_path / "laser"
             rel_img = paths[0].relative_to(data_path)
