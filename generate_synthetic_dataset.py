@@ -78,14 +78,23 @@ def main():
             result, metadata = generate_synthetic_laser(image, seed=seed)
 
             # Construction des masques
-            laser_mask = np.zeros(mask_original.shape, dtype=np.uint8)
+            # (a) laser_mask_alone : {0, 255}, uniquement le laser
+            laser_mask_alone = np.zeros(mask_original.shape, dtype=np.uint8)
+
+            # (b) laser_mask : copie du masque original avec laser=19 sur le contour
+            laser_mask = mask_original.copy()
+
             if metadata["contour"]:
                 pts = np.array(
                     [(j, i) for (i, j) in metadata["contour"]],
                     dtype=np.int32,
                 ).reshape(-1, 1, 2)
-                cv2.fillPoly(laser_mask, [pts], 255)
-                classes_under = np.unique(mask_original[laser_mask > 0])
+
+                cv2.fillPoly(laser_mask_alone, [pts], 255)
+                cv2.fillPoly(laser_mask, [pts], 19)
+
+                # Classes sous le laser (lues sur le masque ORIGINAL, avant modification)
+                classes_under = np.unique(mask_original[laser_mask_alone > 0])
             else:
                 classes_under = np.array([], dtype=np.uint8)
 
@@ -94,7 +103,6 @@ def main():
             ville = rel_img.parent.name
             image_name = rel_img.stem.replace("_leftImg8bit", "")
 
-            # Si l'image est directement à la racine du split, on déduit la ville du préfixe du nom de fichier
             if ville == split:
                 ville = image_name.split("_")[0] if "_" in image_name else "_unknown"
 
@@ -106,8 +114,9 @@ def main():
             Image.fromarray((result * 255).clip(0, 255).astype(np.uint8)).save(out_dir / "laser.png")
 
             # Sauvegarde masques
-            Image.fromarray(mask_original).save(out_dir / "mask.png")
+            Image.fromarray(mask_original).save(out_dir / "original_mask.png")
             Image.fromarray(laser_mask).save(out_dir / "laser_mask.png")
+            Image.fromarray(laser_mask_alone).save(out_dir / "laser_mask_alone.png")
 
             # class.txt : classes fusionnées sous le laser
             merged_classes = sorted({TRAINID_TO_MERGED[int(c)] for c in classes_under})
@@ -115,7 +124,7 @@ def main():
                 for c in merged_classes:
                     f.write(f"{c} {MERGED_NAMES[c]}\n")
 
-            # metadata.json : caractéristiques et contour du laser
+            # metadata.json
             with open(out_dir / "metadata.json", "w", encoding="utf-8") as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
 

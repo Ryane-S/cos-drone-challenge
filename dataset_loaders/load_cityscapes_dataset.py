@@ -16,7 +16,7 @@ from dataset_loaders.utils import random_rot_flip, random_rotate
 
 class CityscapesDataset(Dataset):
     """
-    Charge les paires (image, masque) du dataset Cityscapes.
+    Charge les paires (image, masque) du dataset Cityscapes synthétique.
     """
     def __init__(self, data_path, split="train", transform=None):
         super().__init__()
@@ -24,27 +24,23 @@ class CityscapesDataset(Dataset):
         self.transform = transform
 
         self.data_path = Path(data_path)
-        self.images_dir = self.data_path / "leftImg8bit" / split
+        self.images_dir = self.data_path / "laser" / split
 
-        images_paths = sorted(self.images_dir.glob("**/*_leftImg8bit.png"))
+        images_paths = sorted(self.images_dir.glob("**/laser.png"))
         if not images_paths:
             raise FileNotFoundError(f"Aucune image dans {self.images_dir}")
 
         self.data = []
         missing = []
         for img_path in images_paths:
-            mask_path = Path(
-                str(img_path)
-                .replace("_leftImg8bit.png", "_gtFine_labelTrainIds.png")
-                .replace("leftImg8bit", "gtFine")
-            )
+            mask_path = img_path.parent / "laser_mask.png"
             if not mask_path.exists():
                 missing.append(str(mask_path))
                 continue
             self.data.append((img_path, mask_path))
 
         if missing:
-            raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s) dans le path {mask_path}")
+            raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s), ex: {missing[0]}")
 
         print(f"[CityscapesDataset] split={split} -> {len(self.data)} paires")
 
@@ -122,8 +118,8 @@ def build_dataloader(data_path, split, batch_size=2, num_workers=4, img_size=(51
 
 
 if __name__ == "__main__":
-    for split in ["train", "val"]:
-        dl = build_dataloader("data/cityscapes", split, num_workers=0)
+    for split in ["val"]:
+        dl = build_dataloader("samples", split, num_workers=0)
         imgs, masks = next(iter(dl))
         print(f"\n--- {split} ---")
         print(f"images : {imgs.shape} {imgs.dtype} min={imgs.min():.3f} max={imgs.max():.3f}")
