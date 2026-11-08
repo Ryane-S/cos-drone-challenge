@@ -1,4 +1,4 @@
-"""Script de génération du dataset synthétique"""
+"""Script de génération du dataset Cityscapes synthétique"""
 import json
 from pathlib import Path
 

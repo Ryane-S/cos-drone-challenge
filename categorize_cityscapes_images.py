@@ -1,4 +1,4 @@
-"""Script qui génère un json contenant les occurences des différentes classes fusionnées dans le dataset."""
+"""Script qui génère un json contenant les occurences des différentes classes fusionnées dans le dataset Cityscapes original."""
 import json
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from PIL import Image
 from configs.config_cityscapes import setting_config_cityscapes
 
 configs = setting_config_cityscapes()
-splits = ["train", "val", "test"]
+splits = ["train", "val"]
 occurences = {}
 save_path = "data/occurences_cityscapes_labels.json"
 
