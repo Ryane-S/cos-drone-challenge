@@ -1,4 +1,5 @@
 """Script de génération du dataset synthétique"""
+import json
 from pathlib import Path
 
 import cv2
@@ -11,13 +12,40 @@ from preprocessing.laser_generation.synthetic_laser import generate_synthetic_la
 configs = setting_config_cityscapes()
 splits = ["train", "val", "test"]
 
+# Mapping trainId (0-18, 255) -> classe fusionnée (0-6, 19, 255)
+TRAINID_TO_MERGED = {
+    0: 0, 1: 0,                                    # flat
+    2: 1, 3: 1, 4: 1,                              # construction
+    5: 2, 6: 2, 7: 2,                              # urban_object
+    8: 3, 9: 3,                                    # nature
+    10: 4,                                         # sky
+    11: 5, 12: 5,                                  # human
+    13: 6, 14: 6, 15: 6, 16: 6, 17: 6, 18: 6,      # vehicle
+    19: 19,                                        # laser
+    255: 255,                                      # rest
+}
+
+MERGED_NAMES = {
+    0: "flat",
+    1: "construction",
+    2: "urban_object",
+    3: "nature",
+    4: "sky",
+    5: "human",
+    6: "vehicle",
+    19: "laser",
+    255: "rest",
+}
+
+
 def main():
+    rng = np.random.default_rng(45)
+
     for split in splits:
-        # 1. Récupération des paires (image, mask) pour un split donné
         data_path = Path(configs.data_path)
         images_dir = data_path / "leftImg8bit" / split
         images_paths = sorted(images_dir.glob("**/*_leftImg8bit.png"))
-        
+
         data = []
         missing = []
         for img_path in images_paths:
@@ -30,51 +58,70 @@ def main():
                 missing.append(str(mask_path))
                 continue
             data.append((img_path, mask_path))
-        
-            if missing:
-                raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s) dans le path {mask_path}")
+
+        if missing:
+            raise FileNotFoundError(f"{len(missing)} masque(s) manquant(s), ex: {missing[0]}")
 
         print(f"Split actuel : {split}")
         print(f"[CityscapesDataset] split={split} -> {len(data)} paires à traiter.")
         if len(data) == 0:
             continue
 
-        # 2. Ajouter un faisceau laser sur l'image et son masque correspondant
         print(f"Generating synthetic {split} dataset !")
+        laser_root = data_path / "laser"
 
-        rng = np.random.default_rng(45)
+        for idx, (img_path, mask_path) in enumerate(data):
+            image = np.array(Image.open(img_path).convert("RGB"), dtype=float) / 255
+            mask_original = np.array(Image.open(mask_path))
 
-        for idx, paths in enumerate(data):
-            image = np.array(Image.open(paths[0]).convert("RGB"), dtype=float) / 255
-            mask = np.array(Image.open(paths[1]))
+            seed = int(rng.integers(0, 2**32))
+            result, metadata = generate_synthetic_laser(image, seed=seed)
 
-            seed = int(rng.integers(0, 2**32,))
-
-            result, metadata = generate_synthetic_laser(image, seed=int(seed))
-
+            # Construction des masques
+            laser_mask = np.zeros(mask_original.shape, dtype=np.uint8)
             if metadata["contour"]:
-                pts = np.array([(j, i) for (i, j) in metadata["contour"]],
-                            dtype=np.int32).reshape(-1, 1, 2)
-                cv2.fillPoly(mask, [pts], 19)
+                pts = np.array(
+                    [(j, i) for (i, j) in metadata["contour"]],
+                    dtype=np.int32,
+                ).reshape(-1, 1, 2)
+                cv2.fillPoly(laser_mask, [pts], 255)
+                classes_under = np.unique(mask_original[laser_mask > 0])
+            else:
+                classes_under = np.array([], dtype=np.uint8)
 
-            output_dir = data_path / "laser"
-            rel_img = paths[0].relative_to(data_path)
-            rel_mask = paths[1].relative_to(data_path)
-            image_path_laser = output_dir / rel_img
-            mask_path_laser = output_dir / rel_mask
+            # Détermination du dossier de sortie
+            rel_img = img_path.relative_to(data_path)
+            ville = rel_img.parent.name
+            image_name = rel_img.stem.replace("_leftImg8bit", "")
 
-            image_path_laser.parent.mkdir(parents=True, exist_ok=True)
-            mask_path_laser.parent.mkdir(parents=True, exist_ok=True)
+            # Si l'image est directement à la racine du split, on déduit la ville du préfixe du nom de fichier
+            if ville == split:
+                ville = image_name.split("_")[0] if "_" in image_name else "_unknown"
 
-            image_uint8 = (result * 255).clip(0, 255).astype(np.uint8)
+            out_dir = laser_root / split / ville / image_name
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f"{idx+1} Paire(s) traitée(s) !")
+            # Sauvegarde images
+            Image.fromarray((image * 255).clip(0, 255).astype(np.uint8)).save(out_dir / "original.png")
+            Image.fromarray((result * 255).clip(0, 255).astype(np.uint8)).save(out_dir / "laser.png")
 
-            print(f"Sauvegarde {image_path_laser}")
-            Image.fromarray(image_uint8).save(image_path_laser)
+            # Sauvegarde masques
+            Image.fromarray(mask_original).save(out_dir / "mask.png")
+            Image.fromarray(laser_mask).save(out_dir / "laser_mask.png")
 
-            print(f"Sauvegarde {mask_path_laser}")
-            Image.fromarray(mask).save(mask_path_laser)
+            # class.txt : classes fusionnées sous le laser
+            merged_classes = sorted({TRAINID_TO_MERGED[int(c)] for c in classes_under})
+            with open(out_dir / "class.txt", "w", encoding="utf-8") as f:
+                for c in merged_classes:
+                    f.write(f"{c} {MERGED_NAMES[c]}\n")
 
-if __name__ == '__main__':
+            # metadata.json : caractéristiques et contour du laser
+            with open(out_dir / "metadata.json", "w", encoding="utf-8") as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+            if (idx + 1) % 100 == 0 or (idx + 1) == len(data):
+                print(f"{idx + 1}/{len(data)} paires traitées")
+
+
+if __name__ == "__main__":
     main()
