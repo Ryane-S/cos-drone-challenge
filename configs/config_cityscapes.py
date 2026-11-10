@@ -1,11 +1,13 @@
 """
 Configuration du projet pour le dataset Cityscapes. (Inspiré de : https://github.com/JCruan519/VM-UNet/blob/main/configs/config_setting.py)
 """
+from pathlib import Path
+
 
 class setting_config_cityscapes:
     # Emplacements des datasets
     data_path = 'data/cityscapes'
-    data_path_synthetic = 'data/cityscapes/laser'
+    data_path_synthetic = Path('data/cityscapes/laser')
 
     # Paramètres du dataset
     num_classes = 19

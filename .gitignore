@@ -13,6 +13,7 @@ wheels/
 # Data folders
 data/
 predictions_laser/
+output/
 
 # Token's file
 sam3_token
