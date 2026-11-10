@@ -26,15 +26,15 @@ from dataset_loaders.load_cityscapes_dataset import build_dataloader
 class Sam3LaserDetector:
     def __init__(
         self,
+        config,
         model_name_or_path="facebook/sam3",
         device="cuda",
-        confidence_threshold=0.3,
         token=""
     ):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA indisponible.")
-        self.confidence_threshold = confidence_threshold
+        self.confidence_threshold = config.confidence
 
         if token == "":
             raise RuntimeError("Token HF non renseigné")
@@ -217,9 +217,9 @@ def main(prompts=[], nb_images=None):
         # "projection"
     ]
     config = SettingConfigSam3()
-    pred_df = pd.DataFrame(prompts, columns=["Prompt name"])
-    data_path = "data/cityscapes/laser"
-    split = "val"
+    # pred_df = pd.DataFrame(prompts, columns=["Prompt name"])
+    # data_path = "data/cityscapes/laser"
+    # split = "val"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {DEVICE}")
@@ -242,8 +242,8 @@ def main(prompts=[], nb_images=None):
     # --- Initialisation UNIQUE du détecteur ---
     print("Chargement de SAM3 en mémoire...")
     detector = Sam3LaserDetector(
+        config,
         device=DEVICE,
-        confidence_threshold=config.confidence,
         token=token
     )
     evaluate(config, detector)

@@ -8,7 +8,7 @@ from configs.config_cityscapes import setting_config_cityscapes
 
 class SettingConfigSam3(setting_config_cityscapes):
     split = 'val'
-    original_mask_encoding = 'merged'
+    original_mask_encoding = 'trainid'
 
     prompts = PROMPTS = [
         "green laser dot",
@@ -17,7 +17,7 @@ class SettingConfigSam3(setting_config_cityscapes):
         "green dot",
     ]
     confidence = 0.3
-    limit = 5
+    limit = 250
 
     metrics = ['recall']
 

@@ -75,12 +75,12 @@ class CityscapesGenerator:
         image, mask = sample["image"], sample["label"]
 
         # Augmentations aléatoires (uniquement en train)
-        if self.train:
-            r = random.random()
-            if r > 0.5:
-                image, mask = random_rot_flip(image, mask)
-            elif r > 0.25:
-                image, mask = random_rotate(image, mask)
+        # if self.train:
+        #     r = random.random()
+        #     if r > 0.5:
+        #         image, mask = random_rot_flip(image, mask)
+        #     elif r > 0.25:
+        #         image, mask = random_rotate(image, mask)
 
         # Resize
         h, w = image.shape[:2]

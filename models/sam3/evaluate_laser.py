@@ -1,10 +1,3 @@
-"""Évaluation SAM3 : réutilise une classe Sam3LaserDetector existante.
-
-Exemple :
-python evaluate_laser.py --root data/cityscapes/laser --split val \
-    --detector-module sam_inference --original-mask-encoding merged \
-    --prompts "green laser dot" --metrics iou dice precision recall
-"""
 import argparse
 import importlib
 import json
@@ -43,16 +36,40 @@ def read_mask(path, binary=False):
 
 
 def support_classes(original, target, encoding):
-    """Classes réellement recouvertes, avant resize, pas classes prédites."""
+    """Retourne les classes fusionnées réellement recouvertes par le laser."""
+
     if original.shape != target.shape:
-        raise ValueError('original_mask et laser_mask_alone doivent être alignés.')
+        raise ValueError(
+            "original_mask et laser_mask_alone doivent être alignés."
+        )
+
+    if encoding not in {"trainid", "merged"}:
+        raise ValueError(
+            f"Encodage original_mask invalide : {encoding!r}. "
+            "Valeurs acceptées : 'trainid' ou 'merged'."
+        )
+
     ids = np.unique(original[target]).tolist()
-    if encoding == 'trainid':
-        if any(i not in MERGED for i in ids):
-            raise ValueError(f'trainIds inconnus : {ids}')
+
+    if encoding == "trainid":
+        unknown = sorted(set(ids) - set(MERGED))
+
+        if unknown:
+            raise ValueError(
+                f"trainIds inconnus dans original_mask : {unknown}."
+            )
+
         ids = sorted({MERGED[i] for i in ids})
-    if any(i not in NAMES for i in ids):
-        raise ValueError(f'Classes support invalides : {ids}. Vérifier leur encodage.')
+
+    invalid = sorted(set(ids) - set(NAMES))
+
+    if invalid:
+        raise ValueError(
+            f"Classes support invalides : {invalid}. "
+            f"Encodage déclaré : {encoding!r}. "
+            "Vérifier que l'encodage déclaré correspond au masque sauvegardé."
+        )
+
     return [NAMES[i] for i in ids]
 
 
@@ -142,12 +159,14 @@ def evaluate(config, detector):
         raise FileNotFoundError(f'Aucune image laser.png dans {root}')
 
     config.output.mkdir(parents=True, exist_ok=True)
+
     # config = vars(config).copy()
     # config = {k: str(v) if isinstance(v, Path) else v for k, v in config.items()}
     # config.update(empty_denominator='NaN',
     #               fusion='union of all accepted masks', scope='all image pixels',
     #               torch_version=torch.__version__)
     # (config.output / 'evaluation_config.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
+
     rows = []
     for index, path in enumerate(paths):
         folder = path.parent
@@ -159,7 +178,7 @@ def evaluate(config, detector):
 
             if target_native.shape != (native_size[1], native_size[0]):
                 raise ValueError(f'{folder}: image et GT non alignés.')
-
+            print(folder)
             supports = support_classes(read_mask(folder / 'original_mask.png'),
                                        target_native, config.original_mask_encoding)
             size = config.input_size_w, config.input_size_h
@@ -177,51 +196,28 @@ def evaluate(config, detector):
             result = detector.predict(tensor, prompt=prompt)
             pred = merge_masks(result['masks'], target.shape)
             values = binary_metrics(target, pred, config.metrics)
-            row = dict(sample_id=folder.relative_to(root).as_posix(), prompt=prompt,
-                       support_classes=json.dumps(supports), class_txt=classes_text,
-                       laser_type=laser_type(metadata), n_predictions=len(result['scores']),
-                       gt_pixels_native=int(target_native.sum()),
-                       gt_disappeared_after_resize=bool(target_native.any() and not target.any()),
-                       height=target.shape[0], width=target.shape[1],
-                       **values, **flatten_metadata(metadata))
-            rows.append(row)
+
+            rows.append(dict(
+                sample_id=folder.relative_to(root).as_posix(),
+                prompt=prompt,
+                support_classes=json.dumps(supports),
+                class_txt=classes_text,
+                laser_type=laser_type(metadata), n_predictions=len(result['scores']),
+                gt_pixels_native=int(target_native.sum()),
+                gt_disappeared_after_resize=bool(target_native.any() and not target.any()),
+                height=target.shape[0], width=target.shape[1],
+                **values, **flatten_metadata(metadata)
+            ))
+
             if config.save_masks:
                 destination = config.output / 'masks' / folder.relative_to(root)
                 destination.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(pred.astype(np.uint8)*255).save(destination / f'prompt_{prompt_index:02d}.png')
+
             print(f'[{index+1}/{len(paths)}] {prompt}: '
                   + ', '.join(f'{m}={values[m]:.3f}' for m in config.metrics))
-        # Checkpoint : conserve les lignes même en cas d'interruption ultérieure.
+        # Checkpoint
         pd.DataFrame(rows).to_csv(config.output / 'per_image.csv', index=False)
+
     export_results(rows, config.output, config.metrics)
     return pd.DataFrame(rows)
-
-
-# def main():
-    # parser = argparse.ArgumentParser(description=__doc__)
-    # parser.add_argument('--root', type=Path, required=True, help='Dossier contenant train/val/test, sans ajout automatique de laser.')
-    # parser.add_argument('--split', default='val')
-    # parser.add_argument('--detector-module', required=True, help='Module contenant Sam3LaserDetector, sans .py')
-    # parser.add_argument('--original-mask-encoding', choices=['merged', 'trainid'], required=True)
-    # parser.add_argument('--prompts', nargs='+', default=['green laser dot'])
-    # parser.add_argument('--metrics', nargs='+', choices=AVAILABLE, default=list(AVAILABLE))
-    # parser.add_argument('--size', type=int, nargs=2, metavar=('H', 'W'), help='Sans cette option : résolution native.')
-    # parser.add_argument('--limit', type=int)
-    # parser.add_argument('--confidence', type=float, default=0.3)
-    # parser.add_argument('--token-file', type=Path, default=Path('sam3_token'))
-    # parser.add_argument('--output', type=Path, default=Path('evaluation_laser'))
-    # parser.add_argument('--save-masks', action='store_true')
-    # args = parser.parse_args()
-    # if args.limit is not None and args.limit < 1:
-    #     parser.error('--limit doit être >= 1')
-    # if args.size and min(args.size) <= 0:
-    #     parser.error('--size doit être strictement positif')
-    # detector_class = getattr(importlib.import_module(args.detector_module), 'Sam3LaserDetector')
-    # detector = detector_class(device='cuda' if torch.cuda.is_available() else 'cpu',
-    #                           confidence_threshold=args.confidence,
-    #                           token=args.token_file.read_text().strip())
-    # evaluate(args, detector)
-
-
-# if __name__ == '__main__':
-#     main()
