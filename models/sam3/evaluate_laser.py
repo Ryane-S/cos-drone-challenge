@@ -1,5 +1,16 @@
-import argparse
-import importlib
+"""Chargement des données, inférence SAM et sauvegarde des résultats.
+
+Les calculs sont délégués à laser_metrics.py.
+Le détecteur est fourni par le script appelant : il n'est pas chargé ici.
+
+Exports
+-------
+images.csv       : informations de chaque image et paramètres du laser.
+per_image.csv    : résultats par image et prompt, avec classes support.
+by_prompt.csv    : effectifs, moyennes et écarts-types par prompt.
+by_class.csv     : mêmes statistiques par prompt et classe support.
+"""
+
 import json
 from pathlib import Path
 
@@ -7,217 +18,380 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from math import ceil
 
-from models.sam3.laser_metrics import AVAILABLE, binary_metrics
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-MERGED = {0:0, 1:0, 2:1, 3:1, 4:1, 5:2, 6:2, 7:2, 8:3, 9:3,
-          10:4, 11:5, 12:5, 13:6, 14:6, 15:6, 16:6, 17:6, 18:6,
-          19:19, 255:255}
-NAMES = {0:'flat', 1:'construction', 2:'urban_object', 3:'nature',
-         4:'sky', 5:'human', 6:'vehicle', 255:'rest'}
+from models.sam3.laser_metrics import LaserMetrics
+
+
+TRAINID_TO_MERGED = {
+    0: 0, 1: 0,                       # flat
+    2: 1, 3: 1, 4: 1,                 # construction
+    5: 2, 6: 2, 7: 2,                 # urban_object
+    8: 3, 9: 3,                       # nature
+    10: 4,                            # sky
+    11: 5, 12: 5,                     # human
+    13: 6, 14: 6, 15: 6,
+    16: 6, 17: 6, 18: 6,              # vehicle
+    255: 255,                         # rest
+}
+
+CLASS_NAMES = {
+    0: "flat",
+    1: "construction",
+    2: "urban_object",
+    3: "nature",
+    4: "sky",
+    5: "human",
+    6: "vehicle",
+    255: "rest",
+}
 
 
 def read_mask(path, binary=False):
+    """Lit un masque indexé 2D ou un masque binaire 0/1 ou 0/255.
+
+    Un binaire RGB est accepté si ses trois canaux sont identiques.
+    Les visualisations RGB des classes Cityscapes sont refusées.
+    """
     with Image.open(path) as image:
         mask = np.asarray(image).copy()
-    if mask.ndim == 3:
-        if not binary or mask.shape[2] not in (3, 4):
-            raise ValueError(f'{path}: masque de classes indexé 2D requis, pas une image colorée.')
+
+    if mask.ndim == 3 and binary and mask.shape[-1] in (3, 4):
         if not np.all(mask[..., :3] == mask[..., :1]):
-            raise ValueError(f'{path}: masque binaire RGB non gris.')
+            raise ValueError(f"{path} : le masque binaire RGB doit être gris.")
         mask = mask[..., 0]
+
     if mask.ndim != 2:
-        raise ValueError(f'{path}: masque 2D requis.')
+        raise ValueError(f"{path} : un masque indexé 2D est requis.")
+
     if binary:
-        if not set(np.unique(mask).tolist()) <= {0, 1, 255}:
-            raise ValueError(f'{path}: valeurs binaires attendues (0/1 ou 0/255).')
+        if not set(np.unique(mask)).issubset({0, 1, 255}):
+            raise ValueError(f"{path} : valeurs binaires 0/1 ou 0/255 requises.")
         return mask > 0
+
     return mask
 
 
 def support_classes(original, target, encoding):
-    """Retourne les classes fusionnées réellement recouvertes par le laser."""
+    """Identifie les classes couvertes par le laser à la résolution native.
 
+    encoding vaut 'trainid' pour les 19 classes initiales ou 'merged'
+    si original_mask.png contient déjà les sept classes regroupées.
+    Le masque original ne doit pas contenir la classe laser 19.
+    """
     if original.shape != target.shape:
-        raise ValueError(
-            "original_mask et laser_mask_alone doivent être alignés."
-        )
-
-    if encoding not in {"trainid", "merged"}:
-        raise ValueError(
-            f"Encodage original_mask invalide : {encoding!r}. "
-            "Valeurs acceptées : 'trainid' ou 'merged'."
-        )
+        raise ValueError("Le masque original et le masque laser sont désalignés.")
 
     ids = np.unique(original[target]).tolist()
 
     if encoding == "trainid":
-        unknown = sorted(set(ids) - set(MERGED))
+        if not set(ids).issubset(TRAINID_TO_MERGED):
+            raise ValueError(f"trainIds non reconnus : {ids}")
+        ids = sorted({TRAINID_TO_MERGED[value] for value in ids})
+    elif encoding != "merged":
+        raise ValueError("original_mask_encoding doit valoir 'trainid' ou 'merged'.")
 
-        if unknown:
+    if not set(ids).issubset(CLASS_NAMES):
+        raise ValueError(f"Classes fusionnées non reconnues : {ids}")
+
+    return [CLASS_NAMES[value] for value in ids]
+
+
+def load_sample(path, root, config):
+    """Retourne l'image CHW [0,1], la référence binaire et les informations.
+
+    Image et cible sont redimensionnées ensemble à la résolution du config.
+    Les classes support sont déterminées avant ce redimensionnement.
+    Les métadonnées sont conservées pour images.csv, pas pour per_image.csv.
+    """
+    folder = path.parent
+    native_target = read_mask(folder / "laser_mask_alone.png", binary=True)
+    original_mask = read_mask(folder / "original_mask.png")
+
+    supports = support_classes(
+        original_mask,
+        native_target,
+        config.original_mask_encoding,
+    )
+
+    size = (config.input_size_w, config.input_size_h)
+
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        native_width, native_height = image.size
+
+        if native_target.shape != (native_height, native_width):
+            raise ValueError(f"{folder} : l'image et le masque sont désalignés.")
+
+        resized = image.resize(size, Image.Resampling.BICUBIC)
+        image_array = np.asarray(resized).copy()
+
+    target_image = Image.fromarray(native_target.astype(np.uint8))
+    target_image = target_image.resize(size, Image.Resampling.NEAREST)
+    target = np.asarray(target_image).astype(bool)
+
+    metadata_path = folder / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    # Aplatit les dictionnaires, mais conserve les listes dans une seule cellule.
+    flat_metadata = (
+        pd.json_normalize(metadata, sep=".").iloc[0].to_dict()
+        if metadata else {}
+    )
+
+    info = {
+        "sample_id": folder.relative_to(root).as_posix(),
+        "support_classes": supports,
+        "class_txt": (folder / "class.txt").read_text(encoding="utf-8").strip(),
+        "native_width": native_width,
+        "native_height": native_height,
+        "eval_width": size[0],
+        "eval_height": size[1],
+        "gt_pixels_native": int(native_target.sum()),
+        "gt_pixels": int(target.sum()),
+        "gt_disappeared_after_resize": bool(native_target.any() and not target.any()),
+        **{f"meta.{key}": value for key, value in flat_metadata.items()},
+    }
+
+    tensor = torch.from_numpy(image_array).permute(2, 0, 1).float() / 255
+    return tensor, target, info
+
+
+def write_csv(frame, path):
+    """Sauvegarde un tableau, en encodant explicitement les listes en JSON.
+
+    Le tableau d'origine n'est pas modifié : les classes restent des listes
+    en mémoire pour les regroupements statistiques.
+    """
+    frame = frame.copy()
+
+    def serialize(value):
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, ensure_ascii=False)
+        return value
+
+    for column in frame:
+        if frame[column].dtype == object:
+            frame[column] = frame[column].map(serialize)
+
+    frame.to_csv(path, index=False)
+
+
+def subplot_filename(sample_id):
+    """Construit un nom plat à partir du chemin relatif de l'échantillon.
+
+    Exemple :
+        city/image_001 -> city__image_001.png
+
+    Le fichier source s'appelant toujours laser.png, son nom seul
+    ne permet pas de distinguer les échantillons.
+    """
+    parts = Path(sample_id).parts
+
+    if not parts:
+        raise ValueError("sample_id ne doit pas être vide.")
+
+    # Double les underscores existants pour limiter les ambiguïtés
+    # entre un séparateur de dossiers et le nom d'un dossier.
+    encoded = [part.replace("_", "_u") for part in parts]
+    return "__".join(encoded) + ".png"
+
+
+def save_prediction_subplot(image_path, panels, output, sample_id):
+    """Sauvegarde l'image originale et l'union des masques par prompt.
+
+    panels contient des tuples :
+        (nom_du_prompt, masque_fusionne, nombre_de_predictions)
+
+    Aucun masque individuel ni sous-dossier par échantillon n'est créé.
+    """
+    with Image.open(image_path) as source:
+        original = np.asarray(source.convert("RGB")).copy()
+
+    n_panels = 1 + len(panels)
+    n_columns = min(3, n_panels)
+    n_rows = ceil(n_panels / n_columns)
+
+    figure = Figure(
+        figsize=(6 * n_columns, 3.8 * n_rows),
+        constrained_layout=True,
+    )
+    FigureCanvasAgg(figure)
+
+    axes = figure.subplots(
+        n_rows,
+        n_columns,
+        squeeze=False,
+    ).ravel()
+
+    axes[0].imshow(original)
+    axes[0].set_title("Image originale avec laser", fontsize=12)
+
+    for axis, (prompt, mask, n_predictions) in zip(axes[1:], panels):
+        if torch.is_tensor(mask):
+            mask = mask.detach().cpu().numpy()
+
+        mask = np.asarray(mask, dtype=bool)
+
+        if mask.ndim != 2:
             raise ValueError(
-                f"trainIds inconnus dans original_mask : {unknown}."
+                f"{prompt!r} : un masque fusionné 2D est attendu, "
+                f"reçu {mask.shape}."
             )
 
-        ids = sorted({MERGED[i] for i in ids})
-
-    invalid = sorted(set(ids) - set(NAMES))
-
-    if invalid:
-        raise ValueError(
-            f"Classes support invalides : {invalid}. "
-            f"Encodage déclaré : {encoding!r}. "
-            "Vérifier que l'encodage déclaré correspond au masque sauvegardé."
+        axis.imshow(
+            mask,
+            cmap="gray",
+            vmin=0,
+            vmax=1,
+            interpolation="nearest",
         )
 
-    return [NAMES[i] for i in ids]
+        label = "prédiction" if n_predictions == 1 else "prédictions"
+        axis.set_title(
+            f"{prompt} — {n_predictions} {label}",
+            fontsize=12,
+            wrap=True,
+        )
 
+    for axis in axes:
+        axis.axis("off")
 
-def laser_type(metadata):
-    # STUB : ajouter ici ta nomenclature réelle des types de lasers.
-    # Ne pas inventer un type à partir de paramètres continus sans convention.
-    return str(metadata.get('laser_type') or metadata.get('type') or 'unspecified')
+    relative_sample = Path(sample_id)
 
+    destination = (
+            Path(output)
+            / "masks"
+            / relative_sample.parent
+            / f"{relative_sample.name}.png"
+    )
 
-def flatten_metadata(value, prefix='meta'):
-    result = {}
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key != 'contour':
-                result.update(flatten_metadata(item, f'{prefix}.{key}'))
-    elif isinstance(value, list):
-        # Vecteurs courts (position, couleur...), pas les grands contours.
-        for i, item in enumerate(value):
-            result.update(flatten_metadata(item, f'{prefix}.{i}'))
-    else:
-        result[prefix] = value
-    return result
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-
-def merge_masks(masks, shape):
-    if masks is None:
-        return np.zeros(shape, dtype=bool)
-    masks = torch.as_tensor(masks).detach().cpu()
-    if masks.numel() == 0:
-        return np.zeros(shape, dtype=bool)
-    if masks.ndim == 4 and masks.shape[1] == 1:
-        masks = masks[:, 0]
-    if masks.ndim != 3 or tuple(masks.shape[-2:]) != tuple(shape):
-        raise ValueError(f'Masques prédits : {tuple(masks.shape)}, attendu (N, {shape}).')
-    if masks.dtype != torch.bool and not torch.all((masks == 0) | (masks == 1)):
-        raise ValueError('Les masques SAM doivent être binaires après post-traitement.')
-    return masks.bool().any(dim=0).numpy()
-
-
-def summary(frame, keys, metrics):
-    rows = []
-    for group, subset in frame.groupby(keys, dropna=False, sort=True):
-        if not isinstance(group, tuple):
-            group = (group,)
-        row = dict(zip(keys, group))
-        row.update(n_images=len(subset),
-                   n_no_prediction=int((subset.n_predictions == 0).sum()),
-                   n_empty_gt=int((subset.gt_pixels == 0).sum()))
-        for metric in metrics:
-            row[f'{metric}_mean'] = subset[metric].mean()
-            row[f'{metric}_std'] = subset[metric].std()
-            row[f'{metric}_n_valid'] = int(subset[metric].count())
-        tp, fp, fn = (int(subset[c].sum()) for c in ('tp', 'fp', 'fn'))
-        denominators = dict(iou=tp+fp+fn, dice=2*tp+fp+fn,
-                            precision=tp+fp, recall=tp+fn)
-        for metric in metrics:
-            numerator = 2*tp if metric == 'dice' else tp
-            denominator = denominators[metric]
-            row[f'{metric}_micro'] = numerator/denominator if denominator else np.nan
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def export_results(rows, output, metrics):
-    frame = pd.DataFrame(rows)
-    frame.to_csv(output / 'per_image.csv', index=False)
-    summary(frame, ['prompt'], metrics).to_csv(output / 'by_prompt.csv', index=False)
-    summary(frame, ['prompt', 'laser_type'], metrics).to_csv(output / 'by_laser_type.csv', index=False)
-    expanded = frame.copy()
-    expanded['support_class'] = expanded.support_classes.map(json.loads)
-    expanded = expanded.explode('support_class').dropna(subset=['support_class'])
-    if not expanded.empty:
-        summary(expanded, ['prompt', 'support_class'], metrics).to_csv(
-            output / 'by_support_class.csv', index=False)
-        summary(expanded, ['prompt', 'support_class', 'laser_type'], metrics).to_csv(
-            output / 'by_support_and_type.csv', index=False)
+    try:
+        figure.savefig(
+            destination,
+            dpi=150,
+            facecolor="white",
+        )
+    finally:
+        figure.clear()
 
 
 def evaluate(config, detector):
-    root = config.data_path_synthetic / config.split
-    paths = sorted(root.rglob('laser.png'))
+    """Exécute l'évaluation et retourne le tableau des prédictions.
+
+    Configuration attendue
+    ----------------------
+    data_path_synthetic, split, output, limit, prompts, metrics,
+    input_size_w, input_size_h, original_mask_encoding, save_masks.
+
+    Le détecteur doit exposer predict(image_tensor, prompt=...).
+    La confiance est réglée dans le détecteur, pas dans cette fonction.
+    """
+    root = Path(config.data_path_synthetic) / config.split
+    output = Path(config.output)
+    paths = sorted(root.rglob("laser.png"))
 
     if config.limit is not None:
+        if config.limit < 1:
+            raise ValueError("limit doit être >= 1 ou None.")
         paths = paths[:config.limit]
 
     if not paths:
-        raise FileNotFoundError(f'Aucune image laser.png dans {root}')
+        raise FileNotFoundError(f"Aucune image laser.png dans {root}")
 
-    config.output.mkdir(parents=True, exist_ok=True)
+    if not config.prompts or len(set(config.prompts)) != len(config.prompts):
+        raise ValueError("La liste de prompts doit être non vide, sans doublons.")
 
-    # config = vars(config).copy()
-    # config = {k: str(v) if isinstance(v, Path) else v for k, v in config.items()}
-    # config.update(empty_denominator='NaN',
-    #               fusion='union of all accepted masks', scope='all image pixels',
-    #               torch_version=torch.__version__)
-    # (config.output / 'evaluation_config.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
+    if min(config.input_size_w, config.input_size_h) <= 0:
+        raise ValueError("Les dimensions d'évaluation doivent être positives.")
 
-    rows = []
+    output.mkdir(parents=True, exist_ok=True)
+
+    metrics = LaserMetrics(config.metrics)
+    image_rows = []
+    prediction_rows = []
+
     for index, path in enumerate(paths):
-        folder = path.parent
+        image, target, info = load_sample(path, root, config)
+        image_rows.append(info)
 
-        with Image.open(path) as image:
-            image = image.convert('RGB')
-            native_size = image.size
-            target_native = read_mask(folder / 'laser_mask_alone.png', binary=True)
+        panels = []
 
-            if target_native.shape != (native_size[1], native_size[0]):
-                raise ValueError(f'{folder}: image et GT non alignés.')
-            print(folder)
-            supports = support_classes(read_mask(folder / 'original_mask.png'),
-                                       target_native, config.original_mask_encoding)
-            size = config.input_size_w, config.input_size_h
-            image_array = np.asarray(image.resize(size, Image.Resampling.BICUBIC)).copy()
+        for prompt in config.prompts:
+            result = detector.predict(image, prompt=prompt)
 
-        target = np.asarray(Image.fromarray(target_native.astype(np.uint8)).resize(
-            size, Image.Resampling.NEAREST)
-        ).astype(bool)
+            values, mask = metrics.update(
+                result,
+                target,
+                prompt,
+                info["support_classes"],
+            )
 
-        metadata = json.loads((folder / 'metadata.json').read_text(encoding='utf-8'))
-        classes_text = (folder / 'class.txt').read_text(encoding='utf-8').strip()
+            n_predictions = len(result["scores"])
 
-        tensor = torch.from_numpy(image_array).permute(2, 0, 1).float() / 255
-        for prompt_index, prompt in enumerate(config.prompts):
-            result = detector.predict(tensor, prompt=prompt)
-            pred = merge_masks(result['masks'], target.shape)
-            values = binary_metrics(target, pred, config.metrics)
-
-            rows.append(dict(
-                sample_id=folder.relative_to(root).as_posix(),
-                prompt=prompt,
-                support_classes=json.dumps(supports),
-                class_txt=classes_text,
-                laser_type=laser_type(metadata), n_predictions=len(result['scores']),
-                gt_pixels_native=int(target_native.sum()),
-                gt_disappeared_after_resize=bool(target_native.any() and not target.any()),
-                height=target.shape[0], width=target.shape[1],
-                **values, **flatten_metadata(metadata)
-            ))
+            prediction_rows.append({
+                "sample_id": info["sample_id"],
+                "prompt": prompt,
+                "support_classes": info["support_classes"],
+                "n_predictions": n_predictions,
+                **values,
+            })
 
             if config.save_masks:
-                destination = config.output / 'masks' / folder.relative_to(root)
-                destination.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(pred.astype(np.uint8)*255).save(destination / f'prompt_{prompt_index:02d}.png')
+                # Copie indépendante : on conserve uniquement le masque fusionné,
+                # pas l'ensemble des instances de chaque prompt.
+                if torch.is_tensor(mask):
+                    display_mask = (
+                        mask.detach().cpu().numpy().astype(bool, copy=True)
+                    )
+                else:
+                    display_mask = np.array(mask, dtype=bool, copy=True)
 
-            print(f'[{index+1}/{len(paths)}] {prompt}: '
-                  + ', '.join(f'{m}={values[m]:.3f}' for m in config.metrics))
-        # Checkpoint
-        pd.DataFrame(rows).to_csv(config.output / 'per_image.csv', index=False)
+                panels.append((
+                    str(prompt),
+                    display_mask,
+                    n_predictions,
+                ))
 
-    export_results(rows, config.output, config.metrics)
-    return pd.DataFrame(rows)
+            description = ", ".join(
+                f"{name}={value:.3f}"
+                for name, value in values.items()
+            )
+
+            print(
+                f"[{index + 1}/{len(paths)}] "
+                f"{prompt} : {description}"
+            )
+
+        # Une seule figure par image, une fois tous les prompts traités.
+        if config.save_masks:
+            save_prediction_subplot(
+                image_path=path,
+                panels=panels,
+                output=output,
+                sample_id=info["sample_id"],
+            )
+
+        # Checkpoint après chaque image complète.
+        # Ne permet pas la reprise des états internes de la mAP.
+        write_csv(
+            pd.DataFrame(image_rows),
+            output / "images.csv",
+        )
+        write_csv(
+            pd.DataFrame(prediction_rows),
+            output / "per_image.csv",
+        )
+
+    predictions = pd.DataFrame(prediction_rows)
+    tables = metrics.tables(predictions)
+
+    for name, table in tables.items():
+        write_csv(table, output / f"{name}.csv")
+
+    return predictions

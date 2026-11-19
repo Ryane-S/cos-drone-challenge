@@ -7,19 +7,19 @@ from configs.config_cityscapes import setting_config_cityscapes
 
 
 class SettingConfigSam3(setting_config_cityscapes):
-    split = 'val'
+    split = 'train'
     original_mask_encoding = 'trainid'
 
-    prompts = PROMPTS = [
+    prompts = [
         "green laser dot",
         "green laser pointer spot",
         "green laser projection spot",
         "green dot",
     ]
-    confidence = 0.3
-    limit = 250
+    confidence = 0.2
+    limit = None
 
-    metrics = ['recall']
+    metrics = ['iou', 'dice', 'precision', 'recall', 'map']
 
     # Sortie
     output = Path("output")
