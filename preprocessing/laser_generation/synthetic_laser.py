@@ -161,7 +161,7 @@ def sample_latents(rng):
         dispersion=float(rng.uniform(0.7, 1.5)),
         size_px=float(rng.uniform(7, 20)),
         roughness=float(rng.uniform(0.2, 0.8)),
-        color=tuple(float(v) for v in rng.dirichlet([0.5, 3.0, 0.5])),
+        color=(0.1, 1.0, 0.1)
     )
 
 
